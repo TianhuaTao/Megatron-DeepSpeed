@@ -1062,6 +1062,8 @@ def _add_checkpointing_args(parser):
                        "initialization.")
     group.add_argument('--universal-checkpoint', action='store_true',
                         help='Loading a universal format checkpoint.')
+    group.add_argument('--conversion-mode', action='store_true',
+                       help="Set to true when converting a model, so that some initialization can be skipped.")
     return parser
 
 
@@ -1264,7 +1266,8 @@ def _add_data_args(parser):
                                 'SentencePieceTokenizer',
                                 'GPTSentencePieceTokenizer',
                                 'HFTokenizer',
-                                'NullTokenizer'],
+                                'NullTokenizer',
+                                'Llama2Tokenizer'],
                        help='What type of tokenizer to use.')
     group.add_argument('--tokenizer-model', type=str, default=None,
                        help='Sentencepiece tokenizer model.')

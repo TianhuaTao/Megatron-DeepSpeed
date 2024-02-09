@@ -6,31 +6,31 @@ set -ex
 # Change the below configurations here
 BASE_PATH=./tmp
 DS_CONFIG=${BASE_PATH}/deepspeed.json
-DATASET_1="./tmp/data/bookcorpus_train_1m_text_sentence"
+DATASET_1="/mnt/ssd1/agpt/agpt-inst/datasets/meg/tokenized-eod/dolma/wiki-en-simple/data_text_document.bin"
 DATASET="1 ${DATASET_1}"
 CHECKPOINT_PATH=./tmp
-TOKENIZER_PATH=./tmp/tokenizer.model # offical llama tokenizer.model
+TOKENIZER_PATH=models/Llama-2-7b-hf/tokenizer.model # offical llama tokenizer.model
 
 TP=2
 PP=2
 ZERO_STAGE=0
 
-GPUS_PER_NODE=8
+GPUS_PER_NODE=4
 MASTER_ADDR=localhost
 MASTER_PORT=6000
 NNODES=1
 NODE_RANK=0
 
-HIDDEN_SIZE=2048 # e.g. llama-13b: 5120
+HIDDEN_SIZE=1024 # e.g. llama-13b: 5120
 FFN_HIDDEN_SIZE=5504 # e.g. llama-13b: 13824
-NUM_LAYERS=24 # e.g. llama-13b: 40
-NUM_HEADS=16 # e.g. llama-13b: 40
-SEQ_LENGTH=2048
+NUM_LAYERS=16 # e.g. llama-13b: 40
+NUM_HEADS=32 # e.g. llama-13b: 40
+SEQ_LENGTH=512
 NUM_KV_HEADS=4 # llama2 70B uses GQA
 
-MICRO_BATCH_SIZE=4
+MICRO_BATCH_SIZE=2
 GLOBAL_BATCH_SIZE=32 # e.g. llama: 4M tokens
-TRAIN_STEPS=250000 # e.g. llama: 1T tokens / 4M tokens_per_batch = 250000 steps
+TRAIN_STEPS=2500 # e.g. llama: 1T tokens / 4M tokens_per_batch = 250000 steps
 LR=3e-4
 MIN_LR=3e-5
 LR_WARMUP_STEPS=2000
@@ -88,7 +88,7 @@ fi
 
 DISTRIBUTED_ARGS="--nproc_per_node $GPUS_PER_NODE --nnodes $NNODES --node_rank $NODE_RANK --master_addr $MASTER_ADDR --master_port $MASTER_PORT"
 
-torchrun $DISTRIBUTED_ARGS \
+echo torchrun $DISTRIBUTED_ARGS \
        pretrain_gpt.py \
        --tensor-model-parallel-size $TP \
        --pipeline-model-parallel-size $PP \

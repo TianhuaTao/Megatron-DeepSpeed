@@ -29,6 +29,7 @@ def save_checkpoint(queue, args):
         sys.path.insert(0, args.megatron_path)
 
     try:
+        from megatron import get_args
         from megatron.arguments import (parse_args, validate_args)
         from megatron.checkpointing import save_checkpoint
         from megatron.global_vars import set_global_variables, get_args
@@ -79,7 +80,7 @@ def save_checkpoint(queue, args):
         if hasattr(md, 'previous_pipeline_parallel_size'):
             args.target_pipeline_parallel_size = md.previous_pipeline_parallel_size
         else:
-            print("loader did not provide a pipeline parallel size and --target-pipeline-parallel-size not provided on command line. "
+            print("loader, did not provide a pipeline parallel size and --target-pipeline-parallel-size not provided on command line. "
                   "Default to 1.")
             args.target_pipeline_parallel_size = 1
 
@@ -97,6 +98,7 @@ def save_checkpoint(queue, args):
                 '--num-attention-heads', str(md.num_attention_heads),
                 '--max-position-embeddings', str(md.max_position_embeddings),
                 '--tokenizer-type', str(md.tokenizer_type),
+                '--tokenizer-model', md.tokenizer_model,
                 '--tensor-model-parallel-size', str(args.target_tensor_parallel_size),
                 '--pipeline-model-parallel-size', str(args.target_pipeline_parallel_size),
                 '--no-masked-softmax-fusion',
@@ -111,7 +113,8 @@ def save_checkpoint(queue, args):
                 '--no-save-rng',
                 '--no-initialization',
                 '--save-interval', '1',
-                '--save', args.save_dir
+                '--save', args.save_dir,
+                "--make-vocab-size-divisible-by", "8",
                 ]
 
     if md.make_vocab_size_divisible_by is not None:
@@ -137,7 +140,7 @@ def save_checkpoint(queue, args):
     if hasattr (md, 'checkpoint_args'):
         # These are arguments that we are either changing, or cause problems for validation if they are set
         # Note that some of these deal with T5 so will need to be changed if we support T5.
-        args_to_keep = ['tensor_model_parallel_size', 'pipeline_model_parallel_size', 'params_dtype',
+        args_to_keep = ['tensor_model_parallel_size', 'pipeline_model_parallel_size', 'world_size', 'params_dtype',
                         'num_layers_per_virtual_pipeline_stage', 'virtual_pipeline_model_parallel_size',
                         'masked_softmax_fusion', 'bias_gelu_fusion', 'bias_dropout_fusion',
                         'sequence_parallel', 'async_tensor_model_parallel_allreduce',
@@ -163,7 +166,7 @@ def save_checkpoint(queue, args):
 
     validate_args(margs)
 
-    set_global_variables(margs)
+    set_global_variables(margs, build_tokenizer=True)
 
     # margs = megatron args
     margs = get_args()
@@ -262,9 +265,11 @@ def save_checkpoint(queue, args):
 
             # duplicated tensors
             input_layernorm_weight = msg.pop("input layernorm weight")
-            input_layernorm_bias = msg.pop("input layernorm bias")
+            if md.norm_has_bias:
+                input_layernorm_bias = msg.pop("input layernorm bias")
             post_layernorm_weight = msg.pop("post layernorm weight")
-            post_layernorm_bias = msg.pop("post layernorm bias")
+            if md.norm_has_bias:
+                post_layernorm_bias = msg.pop("post layernorm bias")
             if md.linear_bias:
                 dense_bias = msg.pop("dense bias")
                 mlp_l1_bias = msg.pop("mlp l1 bias")
@@ -295,11 +300,13 @@ def save_checkpoint(queue, args):
             for tp_rank in range(args.target_tensor_parallel_size):
                 l = models[tp_rank].language_model.encoder.layers[layer]
                 l.input_layernorm.weight.data.copy_(input_layernorm_weight)
-                l.input_layernorm.bias.data.copy_(input_layernorm_bias)
+                if md.norm_has_bias:
+                    l.input_layernorm.bias.data.copy_(input_layernorm_bias)
                 l.self_attention.query_key_value.weight.data.copy_(qkv_weight[tp_rank])
                 l.self_attention.dense.weight.data.copy_(dense_weight[tp_rank])
                 l.post_attention_layernorm.weight.data.copy_(post_layernorm_weight)
-                l.post_attention_layernorm.bias.data.copy_(post_layernorm_bias)
+                if md.norm_has_bias:
+                    l.post_attention_layernorm.bias.data.copy_(post_layernorm_bias)
                 l.mlp.dense_h_to_4h.weight.data.copy_(mlp_l0_weight[tp_rank])
                 l.mlp.dense_4h_to_h.weight.data.copy_(mlp_l1_weight[tp_rank])
                 if md.linear_bias:
@@ -315,15 +322,18 @@ def save_checkpoint(queue, args):
         if post_process:
             msg = queue_get("final layernorm")
             final_layernorm_weight = msg.pop("weight")
-            final_layernorm_bias = msg.pop("bias")
+            if md.norm_has_bias:
+                final_layernorm_bias = msg.pop("bias")
             for tp_rank in range(args.target_tensor_parallel_size):
                 models[tp_rank].language_model.encoder.final_layernorm.weight.data.copy_(final_layernorm_weight)
-                models[tp_rank].language_model.encoder.final_layernorm.bias.data.copy_(final_layernorm_bias)
+                if md.norm_has_bias:
+                    models[tp_rank].language_model.encoder.final_layernorm.bias.data.copy_(final_layernorm_bias)
                 if pp_rank != 0 and not md.output_layer:
                     # Copy word embeddings to final pipeline rank
                     models[tp_rank].word_embeddings.weight.data.copy_(out_word_embed[tp_rank])
             del final_layernorm_weight
-            del final_layernorm_bias
+            if md.norm_has_bias:
+                del final_layernorm_bias
             check_message(msg)
 
             if md.output_layer:
@@ -361,12 +371,14 @@ def save_checkpoint(queue, args):
                 lm_head_dense_weight = msg.pop("dense weight")
                 lm_head_dense_bias = msg.pop("dense bias")
                 lm_head_layernorm_weight = msg.pop("layernorm weight")
-                lm_head_layernorm_bias = msg.pop("layernorm bias")
+                if md.norm_has_bias:
+                    lm_head_layernorm_bias = msg.pop("layernorm bias")
                 for tp_rank in range(args.target_tensor_parallel_size):
                     models[tp_rank].lm_head.dense.weight.data.copy_(lm_head_dense_weight)
                     models[tp_rank].lm_head.dense.bias.data.copy_(lm_head_dense_bias)
                     models[tp_rank].lm_head.layernorm.weight.data.copy_(lm_head_layernorm_weight)
-                    models[tp_rank].lm_head.layernorm.bias.data.copy_(lm_head_layernorm_bias)
+                    if md.norm_has_bias:
+                        models[tp_rank].lm_head.layernorm.bias.data.copy_(lm_head_layernorm_bias)
                 check_message(msg)
                 msg = queue_get()
 

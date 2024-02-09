@@ -194,7 +194,7 @@ class GPTModel(MegatronModule):
         info = dict()
         args = get_args()
 
-        if DS_UNIVERSAL_CHECKPOINT_INFO:
+        if DS_UNIVERSAL_CHECKPOINT_INFO and not args.conversion_mode:
             # Vocabulary parameters (embeddings) that require special handling due to padding.
             info[VOCABULARY_PARAMETER_PATTERNS] = self._get_vocab_param_patterns()
             

@@ -23,7 +23,7 @@ from deepspeed.runtime.utils import see_memory_usage
 from deepspeed.accelerator.real_accelerator import get_accelerator
 import os
 import subprocess
-
+import datasets
 from torch import nn
 import torch.nn.functional as F
 from contextlib import nullcontext
@@ -102,12 +102,11 @@ def model_provider(pre_process=True, post_process=True):
 
 
 def get_batch(data_iterator):
-    """Generate a batch"""
+    """Generate a batch."""
     args = get_args()
-    tokenizer = get_tokenizer()
 
     # Items and their type.
-    keys = ['text']
+    keys = ['token_ids', 'label_ids', 'loss_mask']
     datatype = torch.int64
 
     # Broadcast data.
@@ -118,42 +117,74 @@ def get_batch(data_iterator):
     data_b = tensor_parallel.broadcast_data(keys, data, datatype)
 
     # Unpack.
-    tokens_ = data_b['text'].long()
-    labels = tokens_[:, 1:].contiguous()
-    tokens = tokens_[:, :-1].contiguous()
+    tokens = data_b['token_ids'].long()
+    labels = data_b['label_ids'].long()
 
     # Get the masks and postition ids.
-    skip_mask = args.use_flash_attn or args.use_flash_attn_triton
-    attention_mask, loss_mask, position_ids = get_ltor_masks_and_position_ids(
-        tokens,
-        tokenizer.eod,
-        args.reset_position_ids,
-        args.reset_attention_mask,
-        args.eod_mask_loss,
-        skip_mask)
+    attention_mask, _, position_ids = get_ltor_masks_and_position_ids(
+        data=tokens,
+        eod_token=None,
+        reset_position_ids=args.reset_position_ids,
+        reset_attention_mask=args.reset_attention_mask,
+        eod_mask_loss=args.eod_mask_loss)
 
-    # For DS's sequence parallel
-    seq_parallel_world_size = mpu.get_sequence_parallel_world_size()
-    seq_parallel_world_rank = mpu.get_sequence_parallel_rank()
-
-    # For Megatron's sequence parallel
-    if args.sequence_parallel:
-        seq_parallel_world_size = mpu.get_tensor_model_parallel_world_size()
-        seq_parallel_world_rank = mpu.get_tensor_model_parallel_rank()
-    seq_length = tokens.size(1)
-
-    assert seq_length % seq_parallel_world_size == 0
-    sub_seq_length = seq_length // seq_parallel_world_size
-    sub_seq_start = seq_parallel_world_rank * sub_seq_length
-    sub_seq_end = (seq_parallel_world_rank + 1) * sub_seq_length
-
-    tokens = tokens[:, sub_seq_start:sub_seq_end]
-    position_ids = position_ids[:, sub_seq_start:sub_seq_end]
-    # For DS's sequence parallel
-    if mpu.get_sequence_parallel_world_size() > 1:
-        labels = labels[:, sub_seq_start:sub_seq_end]
+    loss_mask = data_b['loss_mask'].float()
 
     return tokens, labels, loss_mask, attention_mask, position_ids
+
+# def get_batch(data_iterator):
+#     """Generate a batch"""
+#     args = get_args()
+#     tokenizer = get_tokenizer()
+
+#     # Items and their type.
+#     keys = ['text']
+#     datatype = torch.int64
+
+#     # Broadcast data.
+#     if data_iterator is not None:
+#         data = next(data_iterator)
+#     else:
+#         data = None
+#     data_b = tensor_parallel.broadcast_data(keys, data, datatype)
+
+#     # Unpack.
+#     tokens_ = data_b['text'].long()
+#     labels = tokens_[:, 1:].contiguous()
+#     tokens = tokens_[:, :-1].contiguous()
+
+#     # Get the masks and postition ids.
+#     skip_mask = args.use_flash_attn or args.use_flash_attn_triton
+#     attention_mask, loss_mask, position_ids = get_ltor_masks_and_position_ids(
+#         tokens,
+#         tokenizer.eod,
+#         args.reset_position_ids,
+#         args.reset_attention_mask,
+#         args.eod_mask_loss,
+#         skip_mask)
+
+#     # For DS's sequence parallel
+#     seq_parallel_world_size = mpu.get_sequence_parallel_world_size()
+#     seq_parallel_world_rank = mpu.get_sequence_parallel_rank()
+
+#     # For Megatron's sequence parallel
+#     if args.sequence_parallel:
+#         seq_parallel_world_size = mpu.get_tensor_model_parallel_world_size()
+#         seq_parallel_world_rank = mpu.get_tensor_model_parallel_rank()
+#     seq_length = tokens.size(1)
+
+#     assert seq_length % seq_parallel_world_size == 0
+#     sub_seq_length = seq_length // seq_parallel_world_size
+#     sub_seq_start = seq_parallel_world_rank * sub_seq_length
+#     sub_seq_end = (seq_parallel_world_rank + 1) * sub_seq_length
+
+#     tokens = tokens[:, sub_seq_start:sub_seq_end]
+#     position_ids = position_ids[:, sub_seq_start:sub_seq_end]
+#     # For DS's sequence parallel
+#     if mpu.get_sequence_parallel_world_size() > 1:
+#         labels = labels[:, sub_seq_start:sub_seq_end]
+
+#     return tokens, labels, loss_mask, attention_mask, position_ids
 
 def data_post_process(data, data_sampler_state_dict):
     args = get_args()
@@ -312,26 +343,51 @@ def forward_step(data_iterator, model):
     return output_tensor, partial(loss_func, loss_mask, moe_loss, mos_loss)
 
 
-def train_valid_test_datasets_provider(train_val_test_num_samples):
-    """Build train, valid, and test datasets."""
+# def train_valid_test_datasets_provider(train_val_test_num_samples):
+#     """Build train, valid, and test datasets."""
+#     args = get_args()
+
+#     print_rank_0('> building train, validation, and test datasets '
+#                  'for GPT ...')
+#     train_ds, valid_ds, test_ds = build_train_valid_test_datasets(
+#         data_prefix=args.data_path,
+#         data_impl=args.data_impl,
+#         splits_string=args.split,
+#         train_valid_test_num_samples=train_val_test_num_samples,
+#         seq_length=args.seq_length,
+#         seed=args.seed,
+#         skip_warmup=(not args.mmap_warmup),
+#         train_data_prefix=args.train_data_path,
+#         valid_data_prefix=args.valid_data_path,
+#         test_data_prefix=args.test_data_path,
+#         data_cache_path=args.data_cache_path)
+#     print_rank_0("> finished creating GPT datasets ...")
+
+#     return train_ds, valid_ds, test_ds
+
+
+def instruction_train_valid_test_datasets_provider(num_samples):
     args = get_args()
 
-    print_rank_0('> building train, validation, and test datasets '
-                 'for GPT ...')
-    train_ds, valid_ds, test_ds = build_train_valid_test_datasets(
-        data_prefix=args.data_path,
-        data_impl=args.data_impl,
-        splits_string=args.split,
-        train_valid_test_num_samples=train_val_test_num_samples,
-        seq_length=args.seq_length,
-        seed=args.seed,
-        skip_warmup=(not args.mmap_warmup),
-        train_data_prefix=args.train_data_path,
-        valid_data_prefix=args.valid_data_path,
-        test_data_prefix=args.test_data_path,
-        data_cache_path=args.data_cache_path)
-    print_rank_0("> finished creating GPT datasets ...")
+    print_rank_0(f'Building Instruction Datasets from: {args.data_path} ...')
 
+    train_ds = datasets.load_dataset(
+        "json",
+        data_files=args.data_path,
+        split='train',
+        # num_proc=min(len(data_files), os.cpu_count()),
+        cache_dir='./train_cache/' + args.data_path[0].replace('/', '_'),
+    )
+    train_ds = train_ds.with_format("np")
+
+    # streaming data does not have length
+    if hasattr(train_ds, '__len__'):
+        print_rank_0(f'huggingface dataset built, size = {len(train_ds)}')
+    else:
+        print_rank_0(f'huggingface dataset is streaming')
+
+    valid_ds, test_ds = None, None
+    print_rank_0("> finished creating pretrain datasets ...")
     return train_ds, valid_ds, test_ds
 
 
@@ -364,7 +420,7 @@ def git_ds_info():
 
 if __name__ == "__main__":
     git_ds_info()
-    pretrain(train_valid_test_datasets_provider,
+    pretrain(instruction_train_valid_test_datasets_provider,
              model_provider,
              ModelType.encoder_or_decoder,
              forward_step,

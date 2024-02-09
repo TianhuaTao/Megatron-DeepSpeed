@@ -572,8 +572,13 @@ class ParallelAttention(MegatronModule):
         else:
             local_attn = CoreAttention(self.layer_number, config, self.attn_mask_type)
 
-        self.enable_ds_sequence_parallel = parallel_state.get_sequence_parallel_world_size() > 1 \
-                                           or args.force_ds_sequence_parallel
+        if not args.conversion_mode:
+            # in conversion mode, get_sequence_parallel_world_size is not initialized
+            self.enable_ds_sequence_parallel = parallel_state.get_sequence_parallel_world_size() > 1 \
+                                            or args.force_ds_sequence_parallel
+        else:
+            self.enable_ds_sequence_parallel = False
+
         if self.enable_ds_sequence_parallel:
             assert dist_attn_supported, 'Distributed attention is not supported in this DeepSpeed version'
             assert args.num_attention_heads % parallel_state.get_sequence_parallel_world_size() == 0
