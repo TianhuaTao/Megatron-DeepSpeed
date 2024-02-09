@@ -52,7 +52,8 @@ def _load_checkpoint(queue, args):
                 '--no-save-optim',
                 '--no-save-rng',
                 '--no-initialization',
-                '--load', args.load_dir
+                '--load', args.load_dir,
+                "--conversion-mode"
                 ]
 
     margs = parse_args()
@@ -149,7 +150,7 @@ def _load_checkpoint(queue, args):
                 models[vp_rank].append(model_[vp_rank])
         return models
 
-    set_global_variables(margs)
+    set_global_variables(margs, build_tokenizer=False)
     mpu.set_tensor_model_parallel_world_size(margs.tensor_model_parallel_size)
     mpu.set_pipeline_model_parallel_world_size(margs.pipeline_model_parallel_size)
     mpu.set_virtual_pipeline_model_parallel_world_size(margs.virtual_pipeline_model_parallel_size)
@@ -175,6 +176,13 @@ def _load_checkpoint(queue, args):
     if vp_size is None:
         vp_size = 1
 
+     # Layernorm has bias; RMSNorm does not.
+    if hasattr(checkpoint_args, 'normalization'):
+        norm_has_bias = checkpoint_args.normalization == "layernorm"
+    else:
+        # older models only supported LayerNorm
+        norm_has_bias = True
+
     # metadata
     md = types.SimpleNamespace()
     md.model_type = args.model_type
@@ -196,6 +204,7 @@ def _load_checkpoint(queue, args):
     md.true_vocab_size = true_vocab_size
     md.make_vocab_size_divisible_by = margs.make_vocab_size_divisible_by
     md.checkpoint_args = checkpoint_args
+    md.norm_has_bias = norm_has_bias
 
     # Get first pipe stage
     mpu.set_pipeline_model_parallel_rank(0)
@@ -237,9 +246,11 @@ def _load_checkpoint(queue, args):
                 # Get non-parallel tensors from tp_rank 0
                 layer = models[0].language_model.encoder.layers[layer_num]
                 message["input layernorm weight"] = layer.input_layernorm.weight.data
-                message["input layernorm bias"] = layer.input_layernorm.bias.data
+                if norm_has_bias:
+                    message["input layernorm bias"] = layer.input_layernorm.bias.data
                 message["post layernorm weight"] = layer.post_attention_layernorm.weight.data
-                message["post layernorm bias"] = layer.post_attention_layernorm.bias.data
+                if norm_has_bias:
+                    message["post layernorm bias"] = layer.post_attention_layernorm.bias.data
                 if md.linear_bias:
                     message["dense bias"] = layer.self_attention.dense.bias.data
                     message["mlp l1 bias"] = layer.mlp.dense_4h_to_h.bias.data
@@ -292,8 +303,10 @@ def _load_checkpoint(queue, args):
     # Send final layernorm from tp_rank 0
     message = {
         "weight": models[0].language_model.encoder.final_layernorm.weight.data,
-        "bias": models[0].language_model.encoder.final_layernorm.bias.data
     }
+    if norm_has_bias:
+        message["bias"] = models[0].language_model.encoder.final_layernorm.bias.data
+
     queue_put("final layernorm", message)
 
     if md.output_layer:
@@ -317,8 +330,9 @@ def _load_checkpoint(queue, args):
             "dense weight": models[0].lm_head.dense.weight.data,
             "dense bias": models[0].lm_head.dense.bias.data,
             "layernorm weight": models[0].lm_head.layernorm.weight.data,
-            "layernorm bias": models[0].lm_head.layernorm.bias.data
         }
+        if norm_has_bias:
+            message["layernorm bias"] = models[0].lm_head.layernorm.bias.data
         queue_put("lm head", message)
 
         if md.bert_binary_head:
